@@ -1,7 +1,17 @@
 #!/usr/bin/env python
 """
 Google Spreadsheet MCP Server
-A Model Context Protocol (MCP) server built with FastMCP for interacting with Google Sheets.
+A Model Context Protocol (MCP) server built with FastMCP2 for interacting with Google Sheets.
+
+This server supports different transport protocols:
+- http: HTTP transport with network access (default, recommended for web services)
+- stdio: Standard input/output (for local tools)
+- sse: Server-Sent Events with network access (legacy)
+
+Configure via environment variables:
+- MCP_TRANSPORT: Transport protocol ('http', 'stdio', or 'sse', default: 'http')
+- MCP_HOST: Host to bind to for HTTP/SSE transport (default: '0.0.0.0')
+- MCP_PORT: Port to listen on for HTTP/SSE transport (default: 8000)
 """
 
 import base64
@@ -12,8 +22,8 @@ from dataclasses import dataclass
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
-# MCP imports
-from mcp.server.fastmcp import FastMCP, Context
+# FastMCP2 imports
+from fastmcp import FastMCP
 
 # Google API imports
 from google.oauth2.credentials import Credentials
@@ -31,103 +41,136 @@ CREDENTIALS_PATH = os.environ.get('CREDENTIALS_PATH', 'credentials.json')
 SERVICE_ACCOUNT_PATH = os.environ.get('SERVICE_ACCOUNT_PATH', 'service_account.json')
 DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', '')  # Working directory in Google Drive
 
-@dataclass
-class SpreadsheetContext:
-    """Context for Google Spreadsheet service"""
-    sheets_service: Any
-    drive_service: Any
-    folder_id: Optional[str] = None
+# Transport configuration
+TRANSPORT = os.environ.get('MCP_TRANSPORT', 'http')
 
 
-@asynccontextmanager
-async def spreadsheet_lifespan(server: FastMCP) -> AsyncIterator[SpreadsheetContext]:
-    """Manage Google Spreadsheet API connection lifecycle"""
-    # Authenticate and build the service
-    creds = None
 
-    if CREDENTIALS_CONFIG:
-        creds = service_account.Credentials.from_service_account_info(json.loads(base64.b64decode(CREDENTIALS_CONFIG)), scopes=SCOPES)
+# Global Google services (will be initialized on first use)
+_sheets_service = None
+_drive_service = None
+_folder_id = None
+
+def get_google_services():
+    """Get or initialize Google services"""
+    global _sheets_service, _drive_service, _folder_id
     
-    # Check for explicit service account authentication first (custom SERVICE_ACCOUNT_PATH)
-    if not creds and SERVICE_ACCOUNT_PATH and os.path.exists(SERVICE_ACCOUNT_PATH):
-        try:
-            # Regular service account authentication
-            creds = service_account.Credentials.from_service_account_file(
-                SERVICE_ACCOUNT_PATH,
-                scopes=SCOPES
-            )
-            print("Using service account authentication")
-            print(f"Working with Google Drive folder ID: {DRIVE_FOLDER_ID or 'Not specified'}")
-        except Exception as e:
-            print(f"Error using service account authentication: {e}")
-            creds = None
-    
-    # Fall back to OAuth flow if service account auth failed or not configured
-    if not creds:
-        print("Trying OAuth authentication flow")
-        if os.path.exists(TOKEN_PATH):
-            with open(TOKEN_PATH, 'r') as token:
-                creds = Credentials.from_authorized_user_info(json.load(token), SCOPES)
-                
-        # If credentials are not valid or don't exist, get new ones
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                try:
-                    flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
-                    creds = flow.run_local_server(port=0)
+    if _sheets_service is None:
+        # Authenticate and build the service
+        creds = None
+
+        if CREDENTIALS_CONFIG:
+            creds = service_account.Credentials.from_service_account_info(json.loads(base64.b64decode(CREDENTIALS_CONFIG)), scopes=SCOPES)
+        
+        # Check for explicit service account authentication first (custom SERVICE_ACCOUNT_PATH)
+        if not creds and SERVICE_ACCOUNT_PATH and os.path.exists(SERVICE_ACCOUNT_PATH):
+            try:
+                # Regular service account authentication
+                creds = service_account.Credentials.from_service_account_file(
+                    SERVICE_ACCOUNT_PATH,
+                    scopes=SCOPES
+                )
+                print("Using service account authentication")
+                print(f"Working with Google Drive folder ID: {DRIVE_FOLDER_ID or 'Not specified'}")
+            except Exception as e:
+                print(f"Error using service account authentication: {e}")
+                creds = None
+        
+        # Fall back to OAuth flow if service account auth failed or not configured
+        if not creds:
+            print("Trying OAuth authentication flow")
+            if os.path.exists(TOKEN_PATH):
+                with open(TOKEN_PATH, 'r') as token:
+                    creds = Credentials.from_authorized_user_info(json.load(token), SCOPES)
                     
-                    # Save the credentials for the next run
-                    with open(TOKEN_PATH, 'w') as token:
-                        token.write(creds.to_json())
-                    print("Successfully authenticated using OAuth flow")
-                except Exception as e:
-                    print(f"Error with OAuth flow: {e}")
-                    creds = None
+            # If credentials are not valid or don't exist, get new ones
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                else:
+                    try:
+                        # Create flow with out-of-band redirect URI for console applications
+                        flow = InstalledAppFlow.from_client_secrets_file(
+                            CREDENTIALS_PATH, 
+                            SCOPES,
+                            redirect_uri='urn:ietf:wg:oauth:2.0:oob'  # Out-of-band redirect for console apps
+                        )
+                        
+                        # For WSL and headless environments, manually handle OAuth flow
+                        # This will print a URL for manual authentication instead of opening a browser
+                        print("Starting OAuth authentication flow...")
+                        print("=" * 80)
+                        print("WSL/Headless Environment Detected")
+                        print("The following URL will open in your browser for authentication:")
+                        print("=" * 80)
+                        
+                        # Get the authorization URL
+                        auth_url, _ = flow.authorization_url(prompt='consent')
+                        print(f"\n🔗 AUTHORIZATION URL:")
+                        print(f"{auth_url}")
+                        print("\n" + "=" * 80)
+                        print("INSTRUCTIONS:")
+                        print("1. Copy the URL above")
+                        print("2. Open it in your Windows browser (outside WSL)")
+                        print("3. Complete the Google authentication")
+                        print("4. After authentication, you'll see a page with an authorization code")
+                        print("5. Copy the authorization code and paste it below when prompted")
+                        print("=" * 80)
+                        
+                        # Get the authorization code from user input
+                        try:
+                            auth_code = input("\nEnter the authorization code: ").strip()
+                            if not auth_code:
+                                raise ValueError("No authorization code provided")
+                            
+                            # Exchange the code for credentials
+                            flow.fetch_token(code=auth_code)
+                            creds = flow.credentials
+                            
+                            # Save the credentials for the next run
+                            with open(TOKEN_PATH, 'w') as token:
+                                token.write(creds.to_json())
+                            print("✅ Successfully authenticated using OAuth flow")
+                            
+                        except (EOFError, KeyboardInterrupt, ValueError) as e:
+                            print(f"❌ Authentication cancelled or failed: {e}")
+                            creds = None
+                            
+                    except Exception as e:
+                        print(f"❌ Error with OAuth flow: {e}")
+                        creds = None
+        
+        # Try Application Default Credentials if no creds thus far
+        # This will automatically check GOOGLE_APPLICATION_CREDENTIALS, gcloud auth, and metadata service
+        if not creds:
+            try:
+                print("Attempting to use Application Default Credentials (ADC)")
+                print("ADC will check: GOOGLE_APPLICATION_CREDENTIALS, gcloud auth, and metadata service")
+                creds, project = google.auth.default(
+                    scopes=SCOPES
+                )
+                print(f"Successfully authenticated using ADC for project: {project}")
+            except Exception as e:
+                print(f"Error using Application Default Credentials: {e}")
+                raise Exception("All authentication methods failed. Please configure credentials.")
+        
+        # Build the services
+        _sheets_service = build('sheets', 'v4', credentials=creds)
+        _drive_service = build('drive', 'v3', credentials=creds)
+        _folder_id = DRIVE_FOLDER_ID if DRIVE_FOLDER_ID else None
     
-    # Try Application Default Credentials if no creds thus far
-    # This will automatically check GOOGLE_APPLICATION_CREDENTIALS, gcloud auth, and metadata service
-    if not creds:
-        try:
-            print("Attempting to use Application Default Credentials (ADC)")
-            print("ADC will check: GOOGLE_APPLICATION_CREDENTIALS, gcloud auth, and metadata service")
-            creds, project = google.auth.default(
-                scopes=SCOPES
-            )
-            print(f"Successfully authenticated using ADC for project: {project}")
-        except Exception as e:
-            print(f"Error using Application Default Credentials: {e}")
-            raise Exception("All authentication methods failed. Please configure credentials.")
-    
-    # Build the services
-    sheets_service = build('sheets', 'v4', credentials=creds)
-    drive_service = build('drive', 'v3', credentials=creds)
-    
-    try:
-        # Provide the service in the context
-        yield SpreadsheetContext(
-            sheets_service=sheets_service,
-            drive_service=drive_service,
-            folder_id=DRIVE_FOLDER_ID if DRIVE_FOLDER_ID else None
-        )
-    finally:
-        # No explicit cleanup needed for Google APIs
-        pass
+    return _sheets_service, _drive_service, _folder_id
 
-
-# Initialize the MCP server with lifespan management
-mcp = FastMCP("Google Spreadsheet", 
-              dependencies=["google-auth", "google-auth-oauthlib", "google-api-python-client"],
-              lifespan=spreadsheet_lifespan)
+# Initialize the FastMCP2 server
+mcp = FastMCP("Google Spreadsheet", stateless_http=True )
+#mcp = FastMCP("Google Spreadsheet")
 
 
 @mcp.tool()
 def get_sheet_data(spreadsheet_id: str, 
                    sheet: str,
                    range: Optional[str] = None,
-                   include_grid_data: bool = False,
-                   ctx: Context = None) -> Dict[str, Any]:
+                   include_grid_data: bool = False) -> Dict[str, Any]:
     """
     Get data from a specific sheet in a Google Spreadsheet.
     
@@ -143,7 +186,7 @@ def get_sheet_data(spreadsheet_id: str,
     Returns:
         Grid data structure with either full metadata or just values from Google Sheets API, depending on include_grid_data parameter
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
 
     # Construct the range - keep original API behavior
     if range:
@@ -179,8 +222,7 @@ def get_sheet_data(spreadsheet_id: str,
 @mcp.tool()
 def get_sheet_formulas(spreadsheet_id: str,
                        sheet: str,
-                       range: Optional[str] = None,
-                       ctx: Context = None) -> List[List[Any]]:
+                       range: Optional[str] = None) -> List[List[Any]]:
     """
     Get formulas from a specific sheet in a Google Spreadsheet.
     
@@ -192,7 +234,7 @@ def get_sheet_formulas(spreadsheet_id: str,
     Returns:
         A 2D array of the sheet formulas.
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
     
     # Construct the range
     if range:
@@ -215,8 +257,7 @@ def get_sheet_formulas(spreadsheet_id: str,
 def update_cells(spreadsheet_id: str,
                 sheet: str,
                 range: str,
-                data: List[List[Any]],
-                ctx: Context = None) -> Dict[str, Any]:
+                data: List[List[Any]]) -> Dict[str, Any]:
     """
     Update cells in a Google Spreadsheet.
     
@@ -229,7 +270,7 @@ def update_cells(spreadsheet_id: str,
     Returns:
         Result of the update operation
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
     
     # Construct the range
     full_range = f"{sheet}!{range}"
@@ -253,8 +294,7 @@ def update_cells(spreadsheet_id: str,
 @mcp.tool()
 def batch_update_cells(spreadsheet_id: str,
                        sheet: str,
-                       ranges: Dict[str, List[List[Any]]],
-                       ctx: Context = None) -> Dict[str, Any]:
+                       ranges: Dict[str, List[List[Any]]]) -> Dict[str, Any]:
     """
     Batch update multiple ranges in a Google Spreadsheet.
     
@@ -267,7 +307,7 @@ def batch_update_cells(spreadsheet_id: str,
     Returns:
         Result of the batch update operation
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
     
     # Prepare the batch update request
     data = []
@@ -296,8 +336,7 @@ def batch_update_cells(spreadsheet_id: str,
 def add_rows(spreadsheet_id: str,
              sheet: str,
              count: int,
-             start_row: Optional[int] = None,
-             ctx: Context = None) -> Dict[str, Any]:
+             start_row: Optional[int] = None) -> Dict[str, Any]:
     """
     Add rows to a sheet in a Google Spreadsheet.
     
@@ -310,7 +349,7 @@ def add_rows(spreadsheet_id: str,
     Returns:
         Result of the operation
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
     
     # Get sheet ID
     spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
@@ -354,8 +393,7 @@ def add_rows(spreadsheet_id: str,
 def add_columns(spreadsheet_id: str,
                 sheet: str,
                 count: int,
-                start_column: Optional[int] = None,
-                ctx: Context = None) -> Dict[str, Any]:
+                start_column: Optional[int] = None) -> Dict[str, Any]:
     """
     Add columns to a sheet in a Google Spreadsheet.
     
@@ -368,7 +406,7 @@ def add_columns(spreadsheet_id: str,
     Returns:
         Result of the operation
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
     
     # Get sheet ID
     spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
@@ -409,7 +447,7 @@ def add_columns(spreadsheet_id: str,
 
 
 @mcp.tool()
-def list_sheets(spreadsheet_id: str, ctx: Context = None) -> List[str]:
+def list_sheets(spreadsheet_id: str) -> List[str]:
     """
     List all sheets in a Google Spreadsheet.
     
@@ -419,7 +457,7 @@ def list_sheets(spreadsheet_id: str, ctx: Context = None) -> List[str]:
     Returns:
         List of sheet names
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
     
     # Get spreadsheet metadata
     spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
@@ -434,8 +472,7 @@ def list_sheets(spreadsheet_id: str, ctx: Context = None) -> List[str]:
 def copy_sheet(src_spreadsheet: str,
                src_sheet: str,
                dst_spreadsheet: str,
-               dst_sheet: str,
-               ctx: Context = None) -> Dict[str, Any]:
+               dst_sheet: str) -> Dict[str, Any]:
     """
     Copy a sheet from one spreadsheet to another.
     
@@ -448,7 +485,7 @@ def copy_sheet(src_spreadsheet: str,
     Returns:
         Result of the operation
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
     
     # Get source sheet ID
     src = sheets_service.spreadsheets().get(spreadsheetId=src_spreadsheet).execute()
@@ -507,8 +544,7 @@ def copy_sheet(src_spreadsheet: str,
 @mcp.tool()
 def rename_sheet(spreadsheet: str,
                  sheet: str,
-                 new_name: str,
-                 ctx: Context = None) -> Dict[str, Any]:
+                 new_name: str) -> Dict[str, Any]:
     """
     Rename a sheet in a Google Spreadsheet.
     
@@ -520,7 +556,7 @@ def rename_sheet(spreadsheet: str,
     Returns:
         Result of the operation
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
     
     # Get sheet ID
     spreadsheet_data = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet).execute()
@@ -559,8 +595,7 @@ def rename_sheet(spreadsheet: str,
 
 
 @mcp.tool()
-def get_multiple_sheet_data(queries: List[Dict[str, str]], 
-                            ctx: Context = None) -> List[Dict[str, Any]]:
+def get_multiple_sheet_data(queries: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     """
     Get data from multiple specific ranges in Google Spreadsheets.
     
@@ -574,7 +609,7 @@ def get_multiple_sheet_data(queries: List[Dict[str, str]],
         A list of dictionaries, each containing the original query parameters 
         and the fetched 'data' or an 'error'.
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
     results = []
     
     for query in queries:
@@ -608,8 +643,7 @@ def get_multiple_sheet_data(queries: List[Dict[str, str]],
 
 @mcp.tool()
 def get_multiple_spreadsheet_summary(spreadsheet_ids: List[str],
-                                   rows_to_fetch: int = 5, 
-                                   ctx: Context = None) -> List[Dict[str, Any]]:
+                                   rows_to_fetch: int = 5) -> List[Dict[str, Any]]:
     """
     Get a summary of multiple Google Spreadsheets, including sheet names, 
     headers, and the first few rows of data for each sheet.
@@ -622,7 +656,7 @@ def get_multiple_spreadsheet_summary(spreadsheet_ids: List[str],
         A list of dictionaries, each representing a spreadsheet summary. 
         Includes spreadsheet title, sheet summaries (title, headers, first rows), or an error.
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
     summaries = []
     
     for spreadsheet_id in spreadsheet_ids:
@@ -706,9 +740,7 @@ def get_spreadsheet_info(spreadsheet_id: str) -> str:
     Returns:
         JSON string with spreadsheet information
     """
-    # Access the context through mcp.get_lifespan_context() for resources
-    context = mcp.get_lifespan_context()
-    sheets_service = context.sheets_service
+    sheets_service, _, _ = get_google_services()
     
     # Get spreadsheet metadata
     spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
@@ -730,7 +762,7 @@ def get_spreadsheet_info(spreadsheet_id: str) -> str:
 
 
 @mcp.tool()
-def create_spreadsheet(title: str, ctx: Context = None) -> Dict[str, Any]:
+def create_spreadsheet(title: str) -> Dict[str, Any]:
     """
     Create a new Google Spreadsheet.
     
@@ -740,8 +772,7 @@ def create_spreadsheet(title: str, ctx: Context = None) -> Dict[str, Any]:
     Returns:
         Information about the newly created spreadsheet including its ID
     """
-    drive_service = ctx.request_context.lifespan_context.drive_service
-    folder_id = ctx.request_context.lifespan_context.folder_id
+    _, drive_service, folder_id = get_google_services()
 
     # Create the spreadsheet
     file_body = {
@@ -770,8 +801,7 @@ def create_spreadsheet(title: str, ctx: Context = None) -> Dict[str, Any]:
 
 @mcp.tool()
 def create_sheet(spreadsheet_id: str, 
-                title: str, 
-                ctx: Context = None) -> Dict[str, Any]:
+                title: str) -> Dict[str, Any]:
     """
     Create a new sheet tab in an existing Google Spreadsheet.
     
@@ -782,7 +812,7 @@ def create_sheet(spreadsheet_id: str,
     Returns:
         Information about the newly created sheet
     """
-    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheets_service, _, _ = get_google_services()
     
     # Define the add sheet request
     request_body = {
@@ -815,7 +845,7 @@ def create_sheet(spreadsheet_id: str,
 
 
 @mcp.tool()
-def list_spreadsheets(ctx: Context = None) -> List[Dict[str, str]]:
+def list_spreadsheets() -> List[Dict[str, str]]:
     """
     List all spreadsheets in the configured Google Drive folder.
     If no folder is configured, lists spreadsheets from 'My Drive'.
@@ -823,8 +853,7 @@ def list_spreadsheets(ctx: Context = None) -> List[Dict[str, str]]:
     Returns:
         List of spreadsheets with their ID and title
     """
-    drive_service = ctx.request_context.lifespan_context.drive_service
-    folder_id = ctx.request_context.lifespan_context.folder_id
+    _, drive_service, folder_id = get_google_services()
     
     query = "mimeType='application/vnd.google-apps.spreadsheet'"
     
@@ -853,8 +882,7 @@ def list_spreadsheets(ctx: Context = None) -> List[Dict[str, str]]:
 @mcp.tool()
 def share_spreadsheet(spreadsheet_id: str, 
                       recipients: List[Dict[str, str]],
-                      send_notification: bool = True,
-                      ctx: Context = None) -> Dict[str, List[Dict[str, Any]]]:
+                      send_notification: bool = True) -> Dict[str, List[Dict[str, Any]]]:
     """
     Share a Google Spreadsheet with multiple users via email, assigning specific roles.
     
@@ -872,7 +900,7 @@ def share_spreadsheet(spreadsheet_id: str,
         A dictionary containing lists of 'successes' and 'failures'. 
         Each item in the lists includes the email address and the outcome.
     """
-    drive_service = ctx.request_context.lifespan_context.drive_service
+    _, drive_service, _ = get_google_services()
     successes = []
     failures = []
     
@@ -929,5 +957,25 @@ def share_spreadsheet(spreadsheet_id: str,
     return {"successes": successes, "failures": failures}
 
 def main():
-    # Run the server
-    mcp.run()
+    """
+    Run the FastMCP2 server.
+    
+    The server can be configured via environment variables:
+    - MCP_TRANSPORT: Transport protocol ('http', 'stdio', or 'sse', default: 'http')
+    - MCP_HOST: Host to bind to (default: '0.0.0.0')
+    - MCP_PORT: Port to listen on (default: 8000)
+    """
+    print(f"Starting Google Spreadsheet FastMCP2 Server...")
+    print(f"Transport: {TRANSPORT}")
+    
+    # Configure network settings for HTTP/SSE transports
+    if TRANSPORT in ['http', 'sse']:
+        host = os.environ.get('MCP_HOST', '0.0.0.0')
+        port = int(os.environ.get('MCP_PORT', '8000'))
+        print(f"Host: {host}")
+        print(f"Port: {port}")
+        print(f"Server will be accessible at: http://{host}:{port}")
+        mcp.run(transport=TRANSPORT, host=host, port=port)
+    else:
+        # Use stdio transport
+        mcp.run(transport=TRANSPORT)

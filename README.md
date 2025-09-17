@@ -199,6 +199,7 @@ The server needs credentials to access Google APIs. Choose one method:
 ### Method B: OAuth 2.0 (Interactive / Personal Use) 🧑‍💻
 
 *   **Why?** For personal use or local development where interactive browser login is okay.
+*   **WSL/Headless Support:** The server automatically detects WSL and headless environments, printing a clickable URL instead of trying to open a browser.
 *   **Steps:**
     1.  **Configure OAuth Consent Screen:** In GCP Console -> "APIs & Services" -> "OAuth consent screen". Select "External", fill required info, add scopes (`.../auth/spreadsheets`, `.../auth/drive`), add test users if needed.
     2.  **Create OAuth Client ID:** In GCP Console -> "APIs & Services" -> "Credentials". "+ CREATE CREDENTIALS" -> "OAuth client ID" -> Type: **Desktop app**. Name it. "CREATE". **Download JSON**.
@@ -355,7 +356,7 @@ Add the server config to `claude_desktop_config.json` under `mcpServers`. Choose
   }
 }
 ```
-*Note: A browser may open for Google login on first use. Ensure TOKEN_PATH is writable.*
+*Note: A browser may open for Google login on first use. In WSL or headless environments, a clickable URL will be printed instead. Ensure TOKEN_PATH is writable.*
 
 **🍎 macOS Note:** If you get a `spawn uvx ENOENT` error, replace `"command": "uvx"` with `"command": "/Users/yourusername/.local/bin/uvx"` (replace `yourusername` with your actual username).
 </details>
