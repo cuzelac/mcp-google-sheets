@@ -964,9 +964,15 @@ def main():
     - MCP_TRANSPORT: Transport protocol ('http', 'stdio', or 'sse', default: 'http')
     - MCP_HOST: Host to bind to (default: '0.0.0.0')
     - MCP_PORT: Port to listen on (default: 8000)
+    - FASTMCP_LOG_LEVEL: Log level ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
+    - FASTMCP_MASK_ERROR_DETAILS: Whether to hide detailed error info (default: False)
     """
     print(f"Starting Google Spreadsheet FastMCP2 Server...")
     print(f"Transport: {TRANSPORT}")
+    
+    # Get log level from environment
+    log_level = os.environ.get('FASTMCP_LOG_LEVEL', 'INFO')
+    print(f"Log Level: {log_level}")
     
     # Configure network settings for HTTP/SSE transports
     if TRANSPORT in ['http', 'sse']:
@@ -975,7 +981,7 @@ def main():
         print(f"Host: {host}")
         print(f"Port: {port}")
         print(f"Server will be accessible at: http://{host}:{port}")
-        mcp.run(transport=TRANSPORT, host=host, port=port)
+        mcp.run(transport=TRANSPORT, host=host, port=port, log_level=log_level)
     else:
         # Use stdio transport
-        mcp.run(transport=TRANSPORT)
+        mcp.run(transport=TRANSPORT, log_level=log_level)
