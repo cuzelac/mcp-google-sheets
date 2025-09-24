@@ -934,6 +934,245 @@ def share_spreadsheet(spreadsheet_id: str,
             
     return {"successes": successes, "failures": failures}
 
+
+@mcp.tool()
+def search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Search for content across Google Spreadsheets.
+    
+    This tool searches through spreadsheet titles, sheet names, and cell content
+    to find relevant information based on the query.
+    
+    Args:
+        query: The search query string
+        limit: Maximum number of results to return (default: 10)
+    
+    Returns:
+        List of search results with spreadsheet information and matching content
+    """
+    _, drive_service, folder_id = get_google_services()
+    sheets_service, _, _ = get_google_services()
+    
+    results = []
+    
+    try:
+        # First, search for spreadsheets by title
+        search_query = f"name contains '{query}' and mimeType='application/vnd.google-apps.spreadsheet'"
+        
+        if folder_id:
+            search_query += f" and '{folder_id}' in parents"
+        
+        # Search for spreadsheets
+        drive_results = drive_service.files().list(
+            q=search_query,
+            spaces='drive',
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            fields='files(id, name, modifiedTime)',
+            orderBy='modifiedTime desc',
+            pageSize=limit
+        ).execute()
+        
+        spreadsheets = drive_results.get('files', [])
+        
+        for spreadsheet in spreadsheets:
+            spreadsheet_id = spreadsheet['id']
+            spreadsheet_title = spreadsheet['name']
+            
+            try:
+                # Get all sheets in this spreadsheet
+                spreadsheet_info = sheets_service.spreadsheets().get(
+                    spreadsheetId=spreadsheet_id,
+                    fields='sheets(properties(title,sheetId))'
+                ).execute()
+                
+                # Search through each sheet for content matching the query
+                for sheet in spreadsheet_info.get('sheets', []):
+                    sheet_title = sheet['properties']['title']
+                    sheet_id = sheet['properties']['sheetId']
+                    
+                    # Get sheet data to search through
+                    try:
+                        # Get a reasonable range to search (first 1000 rows, all columns)
+                        range_name = f"{sheet_title}!A1:ZZ1000"
+                        values_result = sheets_service.spreadsheets().values().get(
+                            spreadsheetId=spreadsheet_id,
+                            range=range_name
+                        ).execute()
+                        
+                        values = values_result.get('values', [])
+                        
+                        # Search through the values for matches
+                        matching_rows = []
+                        for row_idx, row in enumerate(values):
+                            for col_idx, cell_value in enumerate(row):
+                                if query.lower() in str(cell_value).lower():
+                                    # Convert column index to letter
+                                    col_letter = chr(65 + col_idx) if col_idx < 26 else f"A{chr(65 + col_idx - 26)}"
+                                    matching_rows.append({
+                                        'row': row_idx + 1,
+                                        'column': col_letter,
+                                        'value': str(cell_value),
+                                        'cell_reference': f"{col_letter}{row_idx + 1}"
+                                    })
+                        
+                        if matching_rows:
+                            results.append({
+                                'spreadsheet_id': spreadsheet_id,
+                                'spreadsheet_title': spreadsheet_title,
+                                'sheet_title': sheet_title,
+                                'sheet_id': sheet_id,
+                                'matches': matching_rows[:5],  # Limit matches per sheet
+                                'total_matches': len(matching_rows),
+                                'match_type': 'content'
+                            })
+                            
+                    except Exception as sheet_error:
+                        # If we can't read the sheet content, still include it if the sheet name matches
+                        if query.lower() in sheet_title.lower():
+                            results.append({
+                                'spreadsheet_id': spreadsheet_id,
+                                'spreadsheet_title': spreadsheet_title,
+                                'sheet_title': sheet_title,
+                                'sheet_id': sheet_id,
+                                'matches': [],
+                                'total_matches': 0,
+                                'match_type': 'sheet_name'
+                            })
+                
+                # If no content matches but spreadsheet title matches, include it
+                if not any(r['spreadsheet_id'] == spreadsheet_id for r in results):
+                    if query.lower() in spreadsheet_title.lower():
+                        results.append({
+                            'spreadsheet_id': spreadsheet_id,
+                            'spreadsheet_title': spreadsheet_title,
+                            'sheet_title': None,
+                            'sheet_id': None,
+                            'matches': [],
+                            'total_matches': 0,
+                            'match_type': 'spreadsheet_title'
+                        })
+                        
+            except Exception as spreadsheet_error:
+                # If we can't access the spreadsheet, skip it
+                continue
+        
+        # Sort results by relevance (content matches first, then sheet names, then spreadsheet titles)
+        def sort_key(result):
+            if result['match_type'] == 'content':
+                return (0, -result['total_matches'])
+            elif result['match_type'] == 'sheet_name':
+                return (1, 0)
+            else:
+                return (2, 0)
+        
+        results.sort(key=sort_key)
+        
+        return results[:limit]
+        
+    except Exception as e:
+        return [{
+            'error': f"Search failed: {str(e)}",
+            'spreadsheet_id': None,
+            'spreadsheet_title': None,
+            'sheet_title': None,
+            'matches': [],
+            'total_matches': 0,
+            'match_type': 'error'
+        }]
+
+
+@mcp.tool()
+def fetch(uri: str) -> str:
+    """
+    Fetch content from a specific Google Spreadsheet resource.
+    
+    This tool retrieves detailed information about a specific spreadsheet,
+    sheet, or cell range based on the provided URI.
+    
+    Args:
+        uri: The URI of the resource to fetch. Supported formats:
+             - spreadsheet://{spreadsheet_id}/info - Get spreadsheet info
+             - spreadsheet://{spreadsheet_id}/{sheet_name} - Get sheet data
+             - spreadsheet://{spreadsheet_id}/{sheet_name}/{range} - Get specific range
+    
+    Returns:
+        JSON string containing the fetched data
+    """
+    try:
+        # Parse the URI
+        if not uri.startswith('spreadsheet://'):
+            return json.dumps({'error': 'Invalid URI format. Must start with "spreadsheet://"'})
+        
+        # Remove the protocol prefix
+        path = uri[14:]  # Remove 'spreadsheet://'
+        parts = path.split('/')
+        
+        if len(parts) < 2:
+            return json.dumps({'error': 'Invalid URI format. Expected: spreadsheet://{spreadsheet_id}/info or spreadsheet://{spreadsheet_id}/{sheet_name}'})
+        
+        spreadsheet_id = parts[0]
+        resource_type = parts[1]
+        
+        sheets_service, _, _ = get_google_services()
+        
+        if resource_type == 'info':
+            # Get spreadsheet information
+            spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+            
+            info = {
+                'spreadsheet_id': spreadsheet_id,
+                'title': spreadsheet.get('properties', {}).get('title', 'Unknown'),
+                'sheets': [
+                    {
+                        'title': sheet['properties']['title'],
+                        'sheetId': sheet['properties']['sheetId'],
+                        'gridProperties': sheet['properties'].get('gridProperties', {})
+                    }
+                    for sheet in spreadsheet.get('sheets', [])
+                ],
+                'properties': spreadsheet.get('properties', {})
+            }
+            
+            return json.dumps(info, indent=2)
+        
+        elif len(parts) >= 2:
+            # Get sheet data
+            sheet_name = resource_type
+            
+            if len(parts) >= 3:
+                # Specific range requested
+                range_str = '/'.join(parts[2:])
+                full_range = f"{sheet_name}!{range_str}"
+            else:
+                # Entire sheet
+                full_range = sheet_name
+            
+            # Get the data
+            result = sheets_service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=full_range
+            ).execute()
+            
+            values = result.get('values', [])
+            
+            response_data = {
+                'spreadsheet_id': spreadsheet_id,
+                'sheet_name': sheet_name,
+                'range': full_range,
+                'values': values,
+                'row_count': len(values),
+                'column_count': len(values[0]) if values else 0
+            }
+            
+            return json.dumps(response_data, indent=2)
+        
+        else:
+            return json.dumps({'error': 'Invalid URI format'})
+            
+    except Exception as e:
+        return json.dumps({'error': f"Failed to fetch resource: {str(e)}"})
+
 def main():
     """
     Run the FastMCP2 server.
