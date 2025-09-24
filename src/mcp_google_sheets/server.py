@@ -12,158 +12,136 @@ Configure via environment variables:
 - MCP_TRANSPORT: Transport protocol ('http', 'stdio', or 'sse', default: 'http')
 - MCP_HOST: Host to bind to for HTTP/SSE transport (default: '0.0.0.0')
 - MCP_PORT: Port to listen on for HTTP/SSE transport (default: 8000)
+- FASTMCP_SERVER_AUTH: Set to 'fastmcp.server.auth.providers.google.GoogleProvider' for Google OAuth
+- FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID: Your Google OAuth 2.0 Client ID
+- FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET: Your Google OAuth 2.0 Client Secret
+- FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL: Public URL of your FastMCP server for OAuth callbacks
+- FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES: Required Google scopes (comma-separated)
 """
 
-import base64
 import os
 from typing import List, Dict, Any, Optional, Union
 import json
-from dataclasses import dataclass
-from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
 
 # FastMCP2 imports
 from fastmcp import FastMCP
+from fastmcp.server.auth.providers.google import GoogleProvider
+from fastmcp.server.dependencies import get_access_token
 
 # Google API imports
 from google.oauth2.credentials import Credentials
-from google.oauth2 import service_account
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-import google.auth
 
 # Constants
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-CREDENTIALS_CONFIG = os.environ.get('CREDENTIALS_CONFIG')
-TOKEN_PATH = os.environ.get('TOKEN_PATH', 'token.json')
-CREDENTIALS_PATH = os.environ.get('CREDENTIALS_PATH', 'credentials.json')
-SERVICE_ACCOUNT_PATH = os.environ.get('SERVICE_ACCOUNT_PATH', 'service_account.json')
 DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', '')  # Working directory in Google Drive
 
 # Transport configuration
 TRANSPORT = os.environ.get('MCP_TRANSPORT', 'http')
 
+# FastMCP Google OAuth configuration
+GOOGLE_CLIENT_ID = os.environ.get('FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.environ.get('FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET')
+GOOGLE_BASE_URL = os.environ.get('FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL', 'http://localhost:8000')
+GOOGLE_SCOPES = os.environ.get('FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES', 'openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive')
 
 
-# Global Google services (will be initialized on first use)
-_sheets_service = None
-_drive_service = None
-_folder_id = None
 
 def get_google_services():
-    """Get or initialize Google services"""
-    global _sheets_service, _drive_service, _folder_id
+    """Get Google services using FastMCP Google OAuth for the current request"""
+    # FastMCP Google OAuth is required
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise Exception("Google OAuth credentials not configured. Please set FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID and FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
     
-    if _sheets_service is None:
-        # Authenticate and build the service
-        creds = None
-
-        if CREDENTIALS_CONFIG:
-            creds = service_account.Credentials.from_service_account_info(json.loads(base64.b64decode(CREDENTIALS_CONFIG)), scopes=SCOPES)
+    # Get credentials from FastMCP OAuth token for the current request
+    try:
+        # Get the OAuth token from FastMCP for the current user
+        token = get_access_token()
         
-        # Check for explicit service account authentication first (custom SERVICE_ACCOUNT_PATH)
-        if not creds and SERVICE_ACCOUNT_PATH and os.path.exists(SERVICE_ACCOUNT_PATH):
-            try:
-                # Regular service account authentication
-                creds = service_account.Credentials.from_service_account_file(
-                    SERVICE_ACCOUNT_PATH,
-                    scopes=SCOPES
-                )
-                print("Using service account authentication")
-                print(f"Working with Google Drive folder ID: {DRIVE_FOLDER_ID or 'Not specified'}")
-            except Exception as e:
-                print(f"Error using service account authentication: {e}")
-                creds = None
+        # The AccessToken object has a 'token' attribute containing the access token
+        access_token = token.token
         
-        # Fall back to OAuth flow if service account auth failed or not configured
-        if not creds:
-            print("Trying OAuth authentication flow")
-            if os.path.exists(TOKEN_PATH):
-                with open(TOKEN_PATH, 'r') as token:
-                    creds = Credentials.from_authorized_user_info(json.load(token), SCOPES)
-                    
-            # If credentials are not valid or don't exist, get new ones
-            if not creds or not creds.valid:
-                if creds and creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
-                else:
-                    try:
-                        # Create flow with out-of-band redirect URI for console applications
-                        flow = InstalledAppFlow.from_client_secrets_file(
-                            CREDENTIALS_PATH, 
-                            SCOPES,
-                            redirect_uri='urn:ietf:wg:oauth:2.0:oob'  # Out-of-band redirect for console apps
-                        )
-                        
-                        # For WSL and headless environments, manually handle OAuth flow
-                        # This will print a URL for manual authentication instead of opening a browser
-                        print("Starting OAuth authentication flow...")
-                        print("=" * 80)
-                        print("WSL/Headless Environment Detected")
-                        print("The following URL will open in your browser for authentication:")
-                        print("=" * 80)
-                        
-                        # Get the authorization URL
-                        auth_url, _ = flow.authorization_url(prompt='consent')
-                        print(f"\n🔗 AUTHORIZATION URL:")
-                        print(f"{auth_url}")
-                        print("\n" + "=" * 80)
-                        print("INSTRUCTIONS:")
-                        print("1. Copy the URL above")
-                        print("2. Open it in your Windows browser (outside WSL)")
-                        print("3. Complete the Google authentication")
-                        print("4. After authentication, you'll see a page with an authorization code")
-                        print("5. Copy the authorization code and paste it below when prompted")
-                        print("=" * 80)
-                        
-                        # Get the authorization code from user input
-                        try:
-                            auth_code = input("\nEnter the authorization code: ").strip()
-                            if not auth_code:
-                                raise ValueError("No authorization code provided")
-                            
-                            # Exchange the code for credentials
-                            flow.fetch_token(code=auth_code)
-                            creds = flow.credentials
-                            
-                            # Save the credentials for the next run
-                            with open(TOKEN_PATH, 'w') as token:
-                                token.write(creds.to_json())
-                            print("✅ Successfully authenticated using OAuth flow")
-                            
-                        except (EOFError, KeyboardInterrupt, ValueError) as e:
-                            print(f"❌ Authentication cancelled or failed: {e}")
-                            creds = None
-                            
-                    except Exception as e:
-                        print(f"❌ Error with OAuth flow: {e}")
-                        creds = None
+        # Get scopes from the token claims instead of using hardcoded SCOPES
+        # This ensures we use the actual scopes granted during OAuth flow
+        token_scopes = token.claims.get('scope', '')
         
-        # Try Application Default Credentials if no creds thus far
-        # This will automatically check GOOGLE_APPLICATION_CREDENTIALS, gcloud auth, and metadata service
-        if not creds:
-            try:
-                print("Attempting to use Application Default Credentials (ADC)")
-                print("ADC will check: GOOGLE_APPLICATION_CREDENTIALS, gcloud auth, and metadata service")
-                creds, project = google.auth.default(
-                    scopes=SCOPES
-                )
-                print(f"Successfully authenticated using ADC for project: {project}")
-            except Exception as e:
-                print(f"Error using Application Default Credentials: {e}")
-                raise Exception("All authentication methods failed. Please configure credentials.")
+        # Handle different scope formats (space-separated or comma-separated)
+        if token_scopes:
+            if ' ' in token_scopes:
+                token_scopes = token_scopes.split()
+            elif ',' in token_scopes:
+                token_scopes = [s.strip() for s in token_scopes.split(',')]
+            else:
+                token_scopes = [token_scopes]
+        else:
+            # Fallback to default scopes if not available in token claims
+            token_scopes = SCOPES
         
-        # Build the services
-        _sheets_service = build('sheets', 'v4', credentials=creds)
-        _drive_service = build('drive', 'v3', credentials=creds)
-        _folder_id = DRIVE_FOLDER_ID if DRIVE_FOLDER_ID else None
+        # Create Google credentials from the OAuth token with actual granted scopes
+        creds = Credentials(
+            token=access_token,
+            refresh_token=None,  # Not needed for OAuth flow
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            scopes=token_scopes
+        )
+        
+    except Exception as e:
+        raise Exception(f"Failed to authenticate with Google APIs using OAuth token: {e}. Please ensure you are authenticated through the OAuth flow.")
     
-    return _sheets_service, _drive_service, _folder_id
+    # Build the services for the current user
+    sheets_service = build('sheets', 'v4', credentials=creds)
+    drive_service = build('drive', 'v3', credentials=creds)
+    folder_id = DRIVE_FOLDER_ID if DRIVE_FOLDER_ID else None
+    
+    return sheets_service, drive_service, folder_id
 
-# Initialize the FastMCP2 server
-mcp = FastMCP("Google Spreadsheet", stateless_http=True )
-#mcp = FastMCP("Google Spreadsheet")
+# Initialize the FastMCP2 server with Google OAuth (required)
+if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+    raise Exception("Google OAuth credentials are required. Please set FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID and FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
+
+# Parse scopes from environment variable
+required_scopes = [scope.strip() for scope in GOOGLE_SCOPES.split(',')]
+
+auth_provider = GoogleProvider(
+    client_id=GOOGLE_CLIENT_ID,
+    client_secret=GOOGLE_CLIENT_SECRET,
+    base_url=GOOGLE_BASE_URL,
+    required_scopes=required_scopes,
+    redirect_path="/auth/callback"  # Default callback path
+)
+print(f"FastMCP Google OAuth configured with base URL: {GOOGLE_BASE_URL}")
+print(f"Required scopes: {required_scopes}")
+
+mcp = FastMCP("Google Spreadsheet", auth=auth_provider)
+
+
+@mcp.tool()
+def get_user_info() -> Dict[str, Any]:
+    """
+    Returns information about the authenticated Google user.
+    Only available when using FastMCP Google OAuth authentication.
+    
+    Returns:
+        Dictionary containing user information from Google OAuth token claims
+    """
+    if not auth_provider:
+        return {"error": "Google OAuth not configured. This tool requires FastMCP Google OAuth authentication."}
+    
+    try:
+        token = get_access_token()
+        # The GoogleProvider stores user data in token claims
+        return {
+            "google_id": token.claims.get("sub"),
+            "email": token.claims.get("email"),
+            "name": token.claims.get("name"),
+            "picture": token.claims.get("picture"),
+            "locale": token.claims.get("locale"),
+            "verified_email": token.claims.get("email_verified")
+        }
+    except Exception as e:
+        return {"error": f"Failed to get user info: {str(e)}"}
 
 
 @mcp.tool()
@@ -966,9 +944,23 @@ def main():
     - MCP_PORT: Port to listen on (default: 8000)
     - FASTMCP_LOG_LEVEL: Log level ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
     - FASTMCP_MASK_ERROR_DETAILS: Whether to hide detailed error info (default: False)
+    
+    Required Google OAuth authentication:
+    - FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID: Your Google OAuth 2.0 Client ID (required)
+    - FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET: Your Google OAuth 2.0 Client Secret (required)
+    - FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL: Public URL of your FastMCP server for OAuth callbacks
+    - FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES: Required Google scopes (comma-separated)
+    
+    Optional configuration:
+    - DRIVE_FOLDER_ID: Google Drive folder ID for organizing spreadsheets
     """
     print(f"Starting Google Spreadsheet FastMCP2 Server...")
     print(f"Transport: {TRANSPORT}")
+    
+    # Show authentication configuration
+    print("✅ FastMCP Google OAuth authentication enabled")
+    print(f"   Base URL: {GOOGLE_BASE_URL}")
+    print(f"   Scopes: {GOOGLE_SCOPES}")
     
     # Get log level from environment
     log_level = os.environ.get('FASTMCP_LOG_LEVEL', 'INFO')
@@ -981,7 +973,16 @@ def main():
         print(f"Host: {host}")
         print(f"Port: {port}")
         print(f"Server will be accessible at: http://{host}:{port}")
+        
+        print(f"OAuth callback URL: http://{host}:{port}/auth/callback")
+        print("Make sure this URL is configured in your Google OAuth Client settings")
+        
         mcp.run(transport=TRANSPORT, host=host, port=port, log_level=log_level)
     else:
         # Use stdio transport
+        print("Note: Google OAuth requires HTTP transport. Using stdio transport.")
         mcp.run(transport=TRANSPORT, log_level=log_level)
+
+
+if __name__ == "__main__":
+    main()
