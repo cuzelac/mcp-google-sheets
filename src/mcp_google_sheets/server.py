@@ -26,6 +26,7 @@ import json
 # FastMCP2 imports
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.google import GoogleProvider
+from fastmcp.server.dependencies import get_access_token
 
 # Google API imports
 from google.oauth2.credentials import Credentials
@@ -46,53 +47,55 @@ GOOGLE_SCOPES = os.environ.get('FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES', 'op
 
 
 
-# Global Google services (will be initialized on first use)
-_sheets_service = None
-_drive_service = None
-_folder_id = None
-
-
 def get_google_services():
-    """Get or initialize Google services using FastMCP Google OAuth"""
-    global _sheets_service, _drive_service, _folder_id
+    """Get Google services using FastMCP Google OAuth for the current request"""
+    # FastMCP Google OAuth is required
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise Exception("Google OAuth credentials not configured. Please set FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID and FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
     
-    if _sheets_service is None:
-        # FastMCP Google OAuth is required
-        if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-            raise Exception("Google OAuth credentials not configured. Please set FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID and FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
+    # Get credentials from FastMCP OAuth token for the current request
+    try:
+        # Get the OAuth token from FastMCP for the current user
+        token = get_access_token()
         
-        # Get credentials from FastMCP OAuth token
-        try:
-            from fastmcp.server.dependencies import get_access_token
-            from google.oauth2.credentials import Credentials
-            
-            # Get the OAuth token from FastMCP
-            token = get_access_token()
-            
-            # The AccessToken object has a 'token' attribute containing the access token
-            access_token = token.token
-            
-            # Create Google credentials from the OAuth token
-            creds = Credentials(
-                token=access_token,
-                refresh_token=None,  # Not needed for OAuth flow
-                token_uri="https://oauth2.googleapis.com/token",
-                client_id=GOOGLE_CLIENT_ID,
-                client_secret=GOOGLE_CLIENT_SECRET,
-                scopes=SCOPES
-            )
-            
-            print(f"Successfully authenticated using FastMCP Google OAuth")
-            
-        except Exception as e:
-            raise Exception(f"Failed to authenticate with Google APIs using OAuth token: {e}. Please ensure you are authenticated through the OAuth flow.")
+        # The AccessToken object has a 'token' attribute containing the access token
+        access_token = token.token
         
-        # Build the services
-        _sheets_service = build('sheets', 'v4', credentials=creds)
-        _drive_service = build('drive', 'v3', credentials=creds)
-        _folder_id = DRIVE_FOLDER_ID if DRIVE_FOLDER_ID else None
+        # Get scopes from the token claims instead of using hardcoded SCOPES
+        # This ensures we use the actual scopes granted during OAuth flow
+        token_scopes = token.claims.get('scope', '')
+        
+        # Handle different scope formats (space-separated or comma-separated)
+        if token_scopes:
+            if ' ' in token_scopes:
+                token_scopes = token_scopes.split()
+            elif ',' in token_scopes:
+                token_scopes = [s.strip() for s in token_scopes.split(',')]
+            else:
+                token_scopes = [token_scopes]
+        else:
+            # Fallback to default scopes if not available in token claims
+            token_scopes = SCOPES
+        
+        # Create Google credentials from the OAuth token with actual granted scopes
+        creds = Credentials(
+            token=access_token,
+            refresh_token=None,  # Not needed for OAuth flow
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            scopes=token_scopes
+        )
+        
+    except Exception as e:
+        raise Exception(f"Failed to authenticate with Google APIs using OAuth token: {e}. Please ensure you are authenticated through the OAuth flow.")
     
-    return _sheets_service, _drive_service, _folder_id
+    # Build the services for the current user
+    sheets_service = build('sheets', 'v4', credentials=creds)
+    drive_service = build('drive', 'v3', credentials=creds)
+    folder_id = DRIVE_FOLDER_ID if DRIVE_FOLDER_ID else None
+    
+    return sheets_service, drive_service, folder_id
 
 # Initialize the FastMCP2 server with Google OAuth (required)
 if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
@@ -127,7 +130,6 @@ def get_user_info() -> Dict[str, Any]:
         return {"error": "Google OAuth not configured. This tool requires FastMCP Google OAuth authentication."}
     
     try:
-        from fastmcp.server.dependencies import get_access_token
         token = get_access_token()
         # The GoogleProvider stores user data in token claims
         return {
