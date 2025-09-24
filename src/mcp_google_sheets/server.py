@@ -1083,33 +1083,33 @@ def search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
-def fetch(uri: str) -> str:
+def fetch(id: str) -> str:
     """
     Fetch content from a specific Google Spreadsheet resource.
     
     This tool retrieves detailed information about a specific spreadsheet,
-    sheet, or cell range based on the provided URI.
+    sheet, or cell range based on the provided resource ID.
     
     Args:
-        uri: The URI of the resource to fetch. Supported formats:
-             - spreadsheet://{spreadsheet_id}/info - Get spreadsheet info
-             - spreadsheet://{spreadsheet_id}/{sheet_name} - Get sheet data
-             - spreadsheet://{spreadsheet_id}/{sheet_name}/{range} - Get specific range
+        id: The resource ID to fetch. Supported formats:
+            - spreadsheet://{spreadsheet_id}/info - Get spreadsheet info
+            - spreadsheet://{spreadsheet_id}/{sheet_name} - Get sheet data
+            - spreadsheet://{spreadsheet_id}/{sheet_name}/{range} - Get specific range
     
     Returns:
         JSON string containing the fetched data
     """
     try:
-        # Parse the URI
-        if not uri.startswith('spreadsheet://'):
-            return json.dumps({'error': 'Invalid URI format. Must start with "spreadsheet://"'})
+        # Parse the ID (which is actually a URI format)
+        if not id.startswith('spreadsheet://'):
+            return json.dumps({'error': 'Invalid ID format. Must start with "spreadsheet://"'})
         
         # Remove the protocol prefix
-        path = uri[14:]  # Remove 'spreadsheet://'
+        path = id[14:]  # Remove 'spreadsheet://'
         parts = path.split('/')
         
         if len(parts) < 2:
-            return json.dumps({'error': 'Invalid URI format. Expected: spreadsheet://{spreadsheet_id}/info or spreadsheet://{spreadsheet_id}/{sheet_name}'})
+            return json.dumps({'error': 'Invalid ID format. Expected: spreadsheet://{spreadsheet_id}/info or spreadsheet://{spreadsheet_id}/{sheet_name}'})
         
         spreadsheet_id = parts[0]
         resource_type = parts[1]
@@ -1168,7 +1168,7 @@ def fetch(uri: str) -> str:
             return json.dumps(response_data, indent=2)
         
         else:
-            return json.dumps({'error': 'Invalid URI format'})
+            return json.dumps({'error': 'Invalid ID format'})
             
     except Exception as e:
         return json.dumps({'error': f"Failed to fetch resource: {str(e)}"})
