@@ -78,8 +78,14 @@ async def main():
         
         # Test the protected tool
         result = await client.call_tool("get_user_info")
-        print(f"Google user: {result['email']}")
-        print(f"Name: {result['name']}")
+        # The result may be wrapped in 'content' or 'structured_content'
+        user_info = (
+            result.get("content")
+            or result.get("structured_content")
+            or result
+        )
+        print(f"Google user: {user_info['email']}")
+        print(f"Name: {user_info['name']}")
 
 if __name__ == "__main__":
     asyncio.run(main())
