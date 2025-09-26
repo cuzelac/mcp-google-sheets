@@ -26,7 +26,11 @@ import json
 # FastMCP2 imports
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.google import GoogleProvider
+from fastmcp.client.auth.oauth import FileTokenStorage
 from fastmcp.server.dependencies import get_access_token
+
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
 
 # Google API imports
 from google.oauth2.credentials import Credentials
@@ -115,6 +119,25 @@ print(f"FastMCP Google OAuth configured with base URL: {GOOGLE_BASE_URL}")
 print(f"Required scopes: {required_scopes}")
 
 mcp = FastMCP("Google Spreadsheet", auth=auth_provider)
+
+
+@mcp.custom_route("/clear_oauth_cache", methods=["GET"])
+def clear_oauth_cache(request: Request) -> PlainTextResponse:
+    """
+    Clear the OAuth cache for the current session.
+    This is a hidden administrative tool for debugging authentication issues.
+    
+    Returns:
+        Dictionary with status message
+    """
+    try:
+        # Initialize the token storage for the server URL
+        storage = FileTokenStorage(server_url=GOOGLE_BASE_URL)
+        # Clear the tokens for this server
+        storage.clear()
+        return PlainTextResponse("OAuth cache cleared successfully. You may need to re-authenticate on next request.")
+    except Exception as e:
+        return PlainTextResponse(f"Failed to clear OAuth cache: {str(e)}")
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
