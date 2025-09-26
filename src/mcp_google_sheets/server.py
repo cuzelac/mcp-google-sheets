@@ -117,7 +117,7 @@ print(f"Required scopes: {required_scopes}")
 mcp = FastMCP("Google Spreadsheet", auth=auth_provider)
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_user_info() -> Dict[str, Any]:
     """
     Returns information about the authenticated Google user.
@@ -144,7 +144,7 @@ def get_user_info() -> Dict[str, Any]:
         return {"error": f"Failed to get user info: {str(e)}"}
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_sheet_data(spreadsheet_id: str, 
                    sheet: str,
                    range: Optional[str] = None,
@@ -197,7 +197,7 @@ def get_sheet_data(spreadsheet_id: str,
 
     return result
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_sheet_formulas(spreadsheet_id: str,
                        sheet: str,
                        range: Optional[str] = None) -> List[List[Any]]:
@@ -424,7 +424,7 @@ def add_columns(spreadsheet_id: str,
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def list_sheets(spreadsheet_id: str) -> List[str]:
     """
     List all sheets in a Google Spreadsheet.
@@ -572,7 +572,7 @@ def rename_sheet(spreadsheet: str,
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_multiple_sheet_data(queries: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     """
     Get data from multiple specific ranges in Google Spreadsheets.
@@ -619,7 +619,7 @@ def get_multiple_sheet_data(queries: List[Dict[str, str]]) -> List[Dict[str, Any
     return results
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_multiple_spreadsheet_summary(spreadsheet_ids: List[str],
                                    rows_to_fetch: int = 5) -> List[Dict[str, Any]]:
     """
@@ -707,7 +707,7 @@ def get_multiple_spreadsheet_summary(spreadsheet_ids: List[str],
     return summaries
 
 
-@mcp.resource("spreadsheet://{spreadsheet_id}/info")
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_spreadsheet_info(spreadsheet_id: str) -> str:
     """
     Get basic information about a Google Spreadsheet.
@@ -822,7 +822,7 @@ def create_sheet(spreadsheet_id: str,
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def list_spreadsheets() -> List[Dict[str, str]]:
     """
     List all spreadsheets in the configured Google Drive folder.
@@ -935,7 +935,7 @@ def share_spreadsheet(spreadsheet_id: str,
     return {"successes": successes, "failures": failures}
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
     """
     Search for content across Google Spreadsheets.
@@ -1082,7 +1082,7 @@ def search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
         }]
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def fetch(id: str) -> str:
     """
     Fetch content from a specific Google Spreadsheet resource.
