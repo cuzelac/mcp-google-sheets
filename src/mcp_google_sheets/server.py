@@ -1105,6 +1105,329 @@ def search(query: str, limit: int = 10) -> List[Dict[str, Any]]:
         }]
 
 
+@mcp.tool()
+def format_cells(spreadsheet_id: str,
+                sheet: str,
+                range: str,
+                formatting: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Apply formatting to cells in a Google Spreadsheet.
+    
+    Args:
+        spreadsheet_id: The ID of the spreadsheet (found in the URL)
+        sheet: The name of the sheet
+        range: Cell range in A1 notation (e.g., 'A1:C10')
+        formatting: Dictionary containing formatting options. Supported options:
+            - text_format: Dictionary with text formatting options:
+                - bold: Boolean for bold text
+                - italic: Boolean for italic text
+                - underline: Boolean for underlined text
+                - strikethrough: Boolean for strikethrough text
+                - font_size: Integer for font size
+                - font_family: String for font family
+                - foreground_color: Dictionary with 'red', 'green', 'blue' values (0.0-1.0)
+            - background_color: Dictionary with 'red', 'green', 'blue' values (0.0-1.0)
+            - horizontal_alignment: String ('LEFT', 'CENTER', 'RIGHT')
+            - vertical_alignment: String ('TOP', 'MIDDLE', 'BOTTOM')
+            - number_format: Dictionary with:
+                - type: String ('TEXT', 'NUMBER', 'PERCENT', 'CURRENCY', 'DATE', 'TIME', 'DATE_TIME', 'SCIENTIFIC')
+                - pattern: String for custom format pattern (e.g., '#,##0.00', 'mm/dd/yyyy')
+            - borders: Dictionary with border formatting:
+                - top, bottom, left, right: Dictionary with:
+                    - style: String ('SOLID', 'DASHED', 'DOTTED', 'SOLID_MEDIUM', 'SOLID_THICK')
+                    - width: Integer (1-3)
+                    - color: Dictionary with 'red', 'green', 'blue' values (0.0-1.0)
+                - inner_horizontal, inner_vertical: Same format as above for inner borders
+            - merge_cells: Boolean to merge all cells in the range
+            - wrap_strategy: String ('OVERFLOW_CELL', 'LEGACY_WRAP', 'CLIP') for text wrapping
+    
+    Returns:
+        Result of the formatting operation
+    """
+    sheets_service, _, _ = get_google_services()
+    
+    # Get sheet ID
+    spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    sheet_id = None
+    
+    for s in spreadsheet['sheets']:
+        if s['properties']['title'] == sheet:
+            sheet_id = s['properties']['sheetId']
+            break
+            
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+    
+    # Convert A1 notation to grid coordinates
+    def a1_to_grid_coords(a1_range):
+        """Convert A1 notation like 'A1:C10' to grid coordinates"""
+        import re
+        
+        # Parse range like 'A1:C10'
+        match = re.match(r'([A-Z]+)(\d+):([A-Z]+)(\d+)', a1_range)
+        if not match:
+            # Single cell like 'A1'
+            match = re.match(r'([A-Z]+)(\d+)', a1_range)
+            if match:
+                start_col, start_row = match.groups()
+                return {
+                    'startRowIndex': int(start_row) - 1,
+                    'endRowIndex': int(start_row),
+                    'startColumnIndex': sum((ord(c) - ord('A') + 1) * (26 ** i) for i, c in enumerate(reversed(start_col))) - 1,
+                    'endColumnIndex': sum((ord(c) - ord('A') + 1) * (26 ** i) for i, c in enumerate(reversed(start_col)))
+                }
+            else:
+                raise ValueError(f"Invalid A1 range format: {a1_range}")
+        
+        start_col, start_row, end_col, end_row = match.groups()
+        
+        def col_to_index(col):
+            return sum((ord(c) - ord('A') + 1) * (26 ** i) for i, c in enumerate(reversed(col))) - 1
+        
+        return {
+            'startRowIndex': int(start_row) - 1,
+            'endRowIndex': int(end_row),
+            'startColumnIndex': col_to_index(start_col),
+            'endColumnIndex': col_to_index(end_col) + 1
+        }
+    
+    try:
+        grid_range = a1_to_grid_coords(range)
+        grid_range['sheetId'] = sheet_id
+    except ValueError as e:
+        return {"error": str(e)}
+    
+    # Build the batch update request
+    requests = []
+    
+    # Handle cell formatting
+    if any(key in formatting for key in ['text_format', 'background_color', 'horizontal_alignment', 'vertical_alignment', 'number_format', 'wrap_strategy']):
+        cell_format = {}
+        
+        # Text formatting
+        if 'text_format' in formatting:
+            text_format = {}
+            tf = formatting['text_format']
+            
+            if 'bold' in tf:
+                text_format['bold'] = tf['bold']
+            if 'italic' in tf:
+                text_format['italic'] = tf['italic']
+            if 'underline' in tf:
+                text_format['underline'] = tf['underline']
+            if 'strikethrough' in tf:
+                text_format['strikethrough'] = tf['strikethrough']
+            if 'font_size' in tf:
+                text_format['fontSize'] = tf['font_size']
+            if 'font_family' in tf:
+                text_format['fontFamily'] = tf['font_family']
+            if 'foreground_color' in tf:
+                text_format['foregroundColor'] = tf['foreground_color']
+            
+            cell_format['textFormat'] = text_format
+        
+        # Background color
+        if 'background_color' in formatting:
+            cell_format['backgroundColor'] = formatting['background_color']
+        
+        # Alignment
+        if 'horizontal_alignment' in formatting:
+            cell_format['horizontalAlignment'] = formatting['horizontal_alignment']
+        if 'vertical_alignment' in formatting:
+            cell_format['verticalAlignment'] = formatting['vertical_alignment']
+        
+        # Number format
+        if 'number_format' in formatting:
+            cell_format['numberFormat'] = formatting['number_format']
+        
+        # Wrap strategy
+        if 'wrap_strategy' in formatting:
+            cell_format['wrapStrategy'] = formatting['wrap_strategy']
+        
+        # Create repeatCell request
+        if cell_format:
+            fields = []
+            if 'textFormat' in cell_format:
+                fields.append('userEnteredFormat.textFormat')
+            if 'backgroundColor' in cell_format:
+                fields.append('userEnteredFormat.backgroundColor')
+            if 'horizontalAlignment' in cell_format:
+                fields.append('userEnteredFormat.horizontalAlignment')
+            if 'verticalAlignment' in cell_format:
+                fields.append('userEnteredFormat.verticalAlignment')
+            if 'numberFormat' in cell_format:
+                fields.append('userEnteredFormat.numberFormat')
+            if 'wrapStrategy' in cell_format:
+                fields.append('userEnteredFormat.wrapStrategy')
+            
+            requests.append({
+                'repeatCell': {
+                    'range': grid_range,
+                    'cell': {
+                        'userEnteredFormat': cell_format
+                    },
+                    'fields': ','.join(fields)
+                }
+            })
+    
+    # Handle borders
+    if 'borders' in formatting:
+        borders = formatting['borders']
+        border_request = {
+            'updateBorders': {
+                'range': grid_range
+            }
+        }
+        
+        # Add border properties
+        for border_type in ['top', 'bottom', 'left', 'right', 'innerHorizontal', 'innerVertical']:
+            if border_type in borders:
+                border_config = borders[border_type]
+                border_obj = {}
+                
+                if 'style' in border_config:
+                    border_obj['style'] = border_config['style']
+                if 'width' in border_config:
+                    border_obj['width'] = border_config['width']
+                if 'color' in border_config:
+                    border_obj['color'] = border_config['color']
+                
+                border_request['updateBorders'][border_type] = border_obj
+        
+        requests.append(border_request)
+    
+    # Handle cell merging
+    if formatting.get('merge_cells', False):
+        requests.append({
+            'mergeCells': {
+                'range': grid_range,
+                'mergeType': 'MERGE_ALL'
+            }
+        })
+    
+    if not requests:
+        return {"error": "No valid formatting options provided"}
+    
+    # Execute the batch update
+    request_body = {
+        "requests": requests
+    }
+    
+    result = sheets_service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body=request_body
+    ).execute()
+    
+    return result
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_formatting_presets() -> Dict[str, Dict[str, Any]]:
+    """
+    Get common formatting presets for easy use with the format_cells tool.
+    
+    Returns:
+        Dictionary containing common formatting presets with descriptive names
+    """
+    return {
+        "header": {
+            "text_format": {
+                "bold": True,
+                "font_size": 12
+            },
+            "background_color": {
+                "red": 0.2,
+                "green": 0.2,
+                "blue": 0.2
+            },
+            "foreground_color": {
+                "red": 1.0,
+                "green": 1.0,
+                "blue": 1.0
+            },
+            "horizontal_alignment": "CENTER"
+        },
+        "currency": {
+            "number_format": {
+                "type": "CURRENCY",
+                "pattern": "$#,##0.00"
+            },
+            "horizontal_alignment": "RIGHT"
+        },
+        "percentage": {
+            "number_format": {
+                "type": "PERCENT",
+                "pattern": "0.00%"
+            },
+            "horizontal_alignment": "RIGHT"
+        },
+        "date": {
+            "number_format": {
+                "type": "DATE",
+                "pattern": "mm/dd/yyyy"
+            }
+        },
+        "highlight": {
+            "background_color": {
+                "red": 1.0,
+                "green": 1.0,
+                "blue": 0.0
+            }
+        },
+        "error": {
+            "text_format": {
+                "bold": True,
+                "foreground_color": {
+                    "red": 1.0,
+                    "green": 0.0,
+                    "blue": 0.0
+                }
+            }
+        },
+        "success": {
+            "text_format": {
+                "bold": True,
+                "foreground_color": {
+                    "red": 0.0,
+                    "green": 0.8,
+                    "blue": 0.0
+                }
+            }
+        },
+        "bordered": {
+            "borders": {
+                "top": {
+                    "style": "SOLID",
+                    "width": 1,
+                    "color": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                },
+                "bottom": {
+                    "style": "SOLID",
+                    "width": 1,
+                    "color": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                },
+                "left": {
+                    "style": "SOLID",
+                    "width": 1,
+                    "color": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                },
+                "right": {
+                    "style": "SOLID",
+                    "width": 1,
+                    "color": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                }
+            }
+        },
+        "centered": {
+            "horizontal_alignment": "CENTER",
+            "vertical_alignment": "MIDDLE"
+        },
+        "wrapped_text": {
+            "wrap_strategy": "LEGACY_WRAP"
+        }
+    }
+
+
 @mcp.tool(annotations={"readOnlyHint": True})
 def fetch(id: str) -> str:
     """

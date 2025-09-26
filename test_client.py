@@ -88,6 +88,10 @@ async def main():
             # Default behavior - test the get_user_info tool
             print("No specific action requested. Testing get_user_info tool:")
             await call_tool_by_name(client, "get_user_info")
+            
+            # Also test the formatting presets tool
+            print("\nTesting get_formatting_presets tool:")
+            await call_tool_by_name(client, "get_formatting_presets")
 
 if __name__ == "__main__":
     asyncio.run(main())
