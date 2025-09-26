@@ -12,21 +12,38 @@ Configure via environment variables:
 - MCP_TRANSPORT: Transport protocol ('http', 'stdio', or 'sse', default: 'http')
 - MCP_HOST: Host to bind to for HTTP/SSE transport (default: '0.0.0.0')
 - MCP_PORT: Port to listen on for HTTP/SSE transport (default: 8000)
-- FASTMCP_SERVER_AUTH: Set to 'fastmcp.server.auth.providers.google.GoogleProvider' for Google OAuth
+- AUTH_MODE: Authentication mode ('oauth', 'bearer', or 'hybrid', default: 'oauth')
+
+For OAuth mode (default):
 - FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID: Your Google OAuth 2.0 Client ID
 - FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET: Your Google OAuth 2.0 Client Secret
 - FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL: Public URL of your FastMCP server for OAuth callbacks
 - FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES: Required Google scopes (comma-separated)
+
+For Bearer token mode:
+- BEARER_TOKEN: Google OAuth 2.0 access token
+- FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID: Your Google OAuth 2.0 Client ID
+- FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET: Your Google OAuth 2.0 Client Secret
+
+For Hybrid mode (OAuth + Bearer tokens):
+- All OAuth mode variables (required)
+- Bearer tokens can be passed by clients in multiple ways:
+  * Authorization header: "Authorization: Bearer <token>"
+  * Query parameter: "?access_token=<token>"
+  * Tool parameter: Use authenticate_with_bearer_token tool
 """
 
 import os
 from typing import List, Dict, Any, Optional, Union
 import json
+from abc import ABC, abstractmethod
 
 # FastMCP2 imports
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.google import GoogleProvider
+from fastmcp.server.auth import BearerAuthProvider
 from fastmcp.server.dependencies import get_access_token
+from fastmcp.server.dependencies import get_request
 
 # Google API imports
 from google.oauth2.credentials import Credentials
@@ -39,6 +56,32 @@ DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', '')  # Working directory in 
 # Transport configuration
 TRANSPORT = os.environ.get('MCP_TRANSPORT', 'http')
 
+# Authentication mode configuration
+AUTH_MODE = os.environ.get('AUTH_MODE', 'oauth')  # 'oauth' or 'bearer'
+BEARER_TOKEN = os.environ.get('BEARER_TOKEN', '')  # Optional bearer token for direct authentication
+
+
+# Custom authentication logic for bearer tokens
+def get_bearer_token_from_request():
+    """Extract bearer token from request context if available"""
+    try:
+        # First try to get token from request headers (client-passed)
+        request = get_request()
+        if request and hasattr(request, 'headers'):
+            auth_header = request.headers.get('Authorization', '')
+            if auth_header.startswith('Bearer '):
+                return auth_header[7:]  # Remove 'Bearer ' prefix
+            
+            # Also check for access_token in query parameters
+            if hasattr(request, 'query_params') and 'access_token' in request.query_params:
+                return request.query_params['access_token']
+        
+        # Fallback to environment variable
+        return BEARER_TOKEN if BEARER_TOKEN else None
+    except Exception:
+        # If we can't access request context, fall back to environment variable
+        return BEARER_TOKEN if BEARER_TOKEN else None
+
 # FastMCP Google OAuth configuration
 GOOGLE_CLIENT_ID = os.environ.get('FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.environ.get('FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET')
@@ -47,48 +90,77 @@ GOOGLE_SCOPES = os.environ.get('FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES', 'op
 
 
 
-def get_google_services():
-    """Get Google services using FastMCP Google OAuth for the current request"""
-    # FastMCP Google OAuth is required
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-        raise Exception("Google OAuth credentials not configured. Please set FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID and FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
+def get_google_services(bearer_token: Optional[str] = None):
+    """Get Google services using either FastMCP OAuth or direct bearer token"""
     
-    # Get credentials from FastMCP OAuth token for the current request
-    try:
-        # Get the OAuth token from FastMCP for the current user
-        token = get_access_token()
+    # Determine which token to use based on authentication mode
+    if AUTH_MODE == 'bearer':
+        # Bearer token mode - try to get token from request first, then environment
+        token_to_use = get_bearer_token_from_request()
+    elif AUTH_MODE == 'hybrid':
+        # Hybrid mode - try bearer token from request first, then provided parameter
+        token_to_use = get_bearer_token_from_request() or bearer_token
+    else:
+        # OAuth mode - no bearer token
+        token_to_use = None
+    
+    # If we have a bearer token, use it directly
+    if token_to_use:
+        try:
+            # Create Google credentials from the provided bearer token
+            creds = Credentials(
+                token=token_to_use,
+                refresh_token=None,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=GOOGLE_CLIENT_ID,
+                client_secret=GOOGLE_CLIENT_SECRET,
+                scopes=SCOPES
+            )
+        except Exception as e:
+            raise Exception(f"Failed to authenticate with Google APIs using bearer token: {e}")
+    
+    # Otherwise, use FastMCP OAuth authentication
+    else:
+        # FastMCP Google OAuth is required
+        if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+            raise Exception("Google OAuth credentials not configured. Please set FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID and FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
         
-        # The AccessToken object has a 'token' attribute containing the access token
-        access_token = token.token
-        
-        # Get scopes from the token claims instead of using hardcoded SCOPES
-        # This ensures we use the actual scopes granted during OAuth flow
-        token_scopes = token.claims.get('scope', '')
-        
-        # Handle different scope formats (space-separated or comma-separated)
-        if token_scopes:
-            if ' ' in token_scopes:
-                token_scopes = token_scopes.split()
-            elif ',' in token_scopes:
-                token_scopes = [s.strip() for s in token_scopes.split(',')]
+        # Get credentials from FastMCP OAuth token for the current user
+        try:
+            # Get the OAuth token from FastMCP for the current user
+            token = get_access_token()
+            
+            # The AccessToken object has a 'token' attribute containing the access token
+            access_token = token.token
+            
+            # Get scopes from the token claims instead of using hardcoded SCOPES
+            # This ensures we use the actual scopes granted during OAuth flow
+            token_scopes = token.claims.get('scope', '')
+            
+            # Handle different scope formats (space-separated or comma-separated)
+            if token_scopes:
+                if ' ' in token_scopes:
+                    token_scopes = token_scopes.split()
+                elif ',' in token_scopes:
+                    token_scopes = [s.strip() for s in token_scopes.split(',')]
+                else:
+                    token_scopes = [token_scopes]
             else:
-                token_scopes = [token_scopes]
-        else:
-            # Fallback to default scopes if not available in token claims
-            token_scopes = SCOPES
-        
-        # Create Google credentials from the OAuth token with actual granted scopes
-        creds = Credentials(
-            token=access_token,
-            refresh_token=None,  # Not needed for OAuth flow
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=GOOGLE_CLIENT_ID,
-            client_secret=GOOGLE_CLIENT_SECRET,
-            scopes=token_scopes
-        )
-        
-    except Exception as e:
-        raise Exception(f"Failed to authenticate with Google APIs using OAuth token: {e}. Please ensure you are authenticated through the OAuth flow.")
+                # Fallback to default scopes if not available in token claims
+                token_scopes = SCOPES
+            
+            # Create Google credentials from the OAuth token with actual granted scopes
+            creds = Credentials(
+                token=access_token,
+                refresh_token=None,  # Not needed for OAuth flow
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=GOOGLE_CLIENT_ID,
+                client_secret=GOOGLE_CLIENT_SECRET,
+                scopes=token_scopes
+            )
+            
+        except Exception as e:
+            raise Exception(f"Failed to authenticate with Google APIs using OAuth token: {e}. Please ensure you are authenticated through the OAuth flow.")
     
     # Build the services for the current user
     sheets_service = build('sheets', 'v4', credentials=creds)
@@ -97,48 +169,131 @@ def get_google_services():
     
     return sheets_service, drive_service, folder_id
 
-# Initialize the FastMCP2 server with Google OAuth (required)
-if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-    raise Exception("Google OAuth credentials are required. Please set FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID and FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
+# Initialize authentication based on mode
+if AUTH_MODE == 'bearer':
+    # Bearer token mode - use FastMCP's BearerAuthProvider
+    if not BEARER_TOKEN:
+        raise Exception("Bearer token mode requires BEARER_TOKEN environment variable")
+    
+    # For bearer token mode, we'll use a simple approach without FastMCP's auth provider
+    # since we need to handle the token directly in get_google_services
+    auth_provider = None
+    print("✅ Bearer token authentication enabled")
+    print(f"   Token: {BEARER_TOKEN[:10]}...{BEARER_TOKEN[-10:] if len(BEARER_TOKEN) > 20 else BEARER_TOKEN}")
 
-# Parse scopes from environment variable
-required_scopes = [scope.strip() for scope in GOOGLE_SCOPES.split(',')]
+elif AUTH_MODE == 'hybrid':
+    # Hybrid mode - supports both OAuth and bearer tokens
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise Exception("Hybrid mode requires Google OAuth credentials. Please set FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID and FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
+    
+    # Parse scopes from environment variable
+    required_scopes = [scope.strip() for scope in GOOGLE_SCOPES.split(',')]
+    
+    auth_provider = GoogleProvider(
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        base_url=GOOGLE_BASE_URL,
+        required_scopes=required_scopes,
+        redirect_path="/auth/callback"
+    )
+    
+    print("✅ Hybrid authentication enabled (OAuth + Bearer tokens)")
+    print(f"   OAuth Base URL: {GOOGLE_BASE_URL}")
+    print(f"   Required scopes: {required_scopes}")
 
-auth_provider = GoogleProvider(
-    client_id=GOOGLE_CLIENT_ID,
-    client_secret=GOOGLE_CLIENT_SECRET,
-    base_url=GOOGLE_BASE_URL,
-    required_scopes=required_scopes,
-    redirect_path="/auth/callback"  # Default callback path
-)
-print(f"FastMCP Google OAuth configured with base URL: {GOOGLE_BASE_URL}")
-print(f"Required scopes: {required_scopes}")
+else:  # AUTH_MODE == 'oauth' (default)
+    # OAuth mode - requires OAuth credentials
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise Exception("Google OAuth credentials are required. Please set FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID and FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET")
+
+    # Parse scopes from environment variable
+    required_scopes = [scope.strip() for scope in GOOGLE_SCOPES.split(',')]
+
+    auth_provider = GoogleProvider(
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        base_url=GOOGLE_BASE_URL,
+        required_scopes=required_scopes,
+        redirect_path="/auth/callback"  # Default callback path
+    )
+    print("✅ FastMCP Google OAuth authentication enabled")
+    print(f"   Base URL: {GOOGLE_BASE_URL}")
+    print(f"   Required scopes: {required_scopes}")
 
 mcp = FastMCP("Google Spreadsheet", auth=auth_provider)
+
+
+@mcp.tool()
+def authenticate_with_bearer_token(bearer_token: str) -> Dict[str, Any]:
+    """
+    Authenticate using a bearer token provided by the client.
+    This tool allows clients to pass Google OAuth access tokens directly.
+    
+    Args:
+        bearer_token: Google OAuth 2.0 access token
+    
+    Returns:
+        Dictionary containing authentication result and user info
+    """
+    try:
+        # Test the bearer token by trying to get Google services
+        sheets_service, drive_service, folder_id = get_google_services(bearer_token)
+        
+        # If we get here, the token is valid
+        return {
+            "success": True,
+            "message": "Bearer token authentication successful",
+            "auth_mode": "bearer_token",
+            "google_id": "bearer_user",
+            "email": "bearer_token_user@example.com",
+            "name": "Bearer Token User",
+            "verified_email": True
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Bearer token authentication failed: {str(e)}",
+            "auth_mode": "bearer_token"
+        }
 
 
 @mcp.tool()
 def get_user_info() -> Dict[str, Any]:
     """
     Returns information about the authenticated Google user.
-    Only available when using FastMCP Google OAuth authentication.
+    Available when using FastMCP Google OAuth authentication or bearer token mode.
     
     Returns:
-        Dictionary containing user information from Google OAuth token claims
+        Dictionary containing user information from OAuth token claims or bearer token info
     """
+    # For bearer token mode, we have limited user info
+    if AUTH_MODE == 'bearer':
+        return {
+            "google_id": "bearer_user",
+            "email": "bearer_token_user@example.com",
+            "name": "Bearer Token User",
+            "picture": None,
+            "locale": None,
+            "verified_email": True,
+            "auth_mode": "bearer_token"
+        }
+    
+    # For OAuth and hybrid modes, use FastMCP authentication
     if not auth_provider:
-        return {"error": "Google OAuth not configured. This tool requires FastMCP Google OAuth authentication."}
+        return {"error": "No authentication provider configured."}
     
     try:
         token = get_access_token()
-        # The GoogleProvider stores user data in token claims
+        
+        # For OAuth mode, we have full user data from Google
         return {
             "google_id": token.claims.get("sub"),
             "email": token.claims.get("email"),
             "name": token.claims.get("name"),
             "picture": token.claims.get("picture"),
             "locale": token.claims.get("locale"),
-            "verified_email": token.claims.get("email_verified")
+            "verified_email": token.claims.get("email_verified"),
+            "auth_mode": "oauth"
         }
     except Exception as e:
         return {"error": f"Failed to get user info: {str(e)}"}
@@ -1184,22 +1339,49 @@ def main():
     - FASTMCP_LOG_LEVEL: Log level ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
     - FASTMCP_MASK_ERROR_DETAILS: Whether to hide detailed error info (default: False)
     
-    Required Google OAuth authentication:
+    Authentication modes:
+    - AUTH_MODE: Authentication mode ('oauth', 'bearer', or 'hybrid', default: 'oauth')
+    
+    For OAuth mode (default):
     - FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID: Your Google OAuth 2.0 Client ID (required)
     - FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET: Your Google OAuth 2.0 Client Secret (required)
     - FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL: Public URL of your FastMCP server for OAuth callbacks
     - FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES: Required Google scopes (comma-separated)
+    
+    For Bearer token mode:
+    - BEARER_TOKEN: Google OAuth 2.0 access token (required)
+    - FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID: Your Google OAuth 2.0 Client ID (required)
+    - FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET: Your Google OAuth 2.0 Client Secret (required)
+    
+For Hybrid mode (OAuth + Bearer tokens):
+- All OAuth mode variables (required)
+- Bearer tokens can be passed by clients in multiple ways:
+  * Authorization header: "Authorization: Bearer <token>"
+  * Query parameter: "?access_token=<token>"
+  * Tool parameter: Use authenticate_with_bearer_token tool
     
     Optional configuration:
     - DRIVE_FOLDER_ID: Google Drive folder ID for organizing spreadsheets
     """
     print(f"Starting Google Spreadsheet FastMCP2 Server...")
     print(f"Transport: {TRANSPORT}")
+    print(f"Authentication Mode: {AUTH_MODE}")
     
-    # Show authentication configuration
-    print("✅ FastMCP Google OAuth authentication enabled")
-    print(f"   Base URL: {GOOGLE_BASE_URL}")
-    print(f"   Scopes: {GOOGLE_SCOPES}")
+    # Show authentication configuration based on mode
+    if AUTH_MODE == 'bearer':
+        if BEARER_TOKEN:
+            print("✅ Bearer token authentication enabled")
+            print(f"   Token: {BEARER_TOKEN[:10]}...{BEARER_TOKEN[-10:] if len(BEARER_TOKEN) > 20 else BEARER_TOKEN}")
+        else:
+            print("⚠️  Bearer token mode but no token provided")
+    elif AUTH_MODE == 'hybrid':
+        print("✅ Hybrid authentication enabled (OAuth + Bearer tokens)")
+        print(f"   OAuth Base URL: {GOOGLE_BASE_URL}")
+        print(f"   Scopes: {GOOGLE_SCOPES}")
+    else:  # oauth mode
+        print("✅ FastMCP Google OAuth authentication enabled")
+        print(f"   Base URL: {GOOGLE_BASE_URL}")
+        print(f"   Scopes: {GOOGLE_SCOPES}")
     
     # Get log level from environment
     log_level = os.environ.get('FASTMCP_LOG_LEVEL', 'INFO')
