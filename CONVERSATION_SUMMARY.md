@@ -15,45 +15,27 @@ This conversation focused on adding bearer token authentication support to the G
 
 ## Implementation Completed
 
-### 1. Authentication Modes Added
-- **`oauth`** (default) - Traditional OAuth flow
-- **`bearer`** - Direct bearer token authentication
-- **`hybrid`** - Both OAuth and bearer tokens supported
+### 1. Authentication Simplified
+- **Unified approach** - Supports both OAuth and bearer token authentication simultaneously
+- **OAuth** - Traditional interactive OAuth flow for web applications
+- **Bearer Token** - Direct token authentication for server-to-server communication
 
 ### 2. Environment Variables
-**New variables:**
-- `AUTH_MODE` - Set to `'oauth'`, `'bearer'`, or `'hybrid'` (default: `'oauth'`)
-- `BEARER_TOKEN` - Google OAuth 2.0 access token for bearer mode
+**Required variables:**
+- `FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID` - Google OAuth 2.0 Client ID
+- `FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET` - Google OAuth 2.0 Client Secret
 
-**Existing variables still work:**
-- All existing OAuth variables (`FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID`, etc.)
+**Optional variables:**
+- `BEARER_TOKEN` - Google OAuth 2.0 access token for server-to-server authentication
+- `FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL` - Public URL for OAuth callbacks
+- `FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES` - Required Google scopes
 
-### 3. Client Bearer Token Methods
-Clients can pass bearer tokens in **three ways**:
+### 3. Client Bearer Token Method
+Clients can pass bearer tokens via **Authorization header**:
 
-#### Method 1: Authorization Header (Recommended)
 ```bash
 curl -H "Authorization: Bearer ya29.a0AfH6SMC..." \
      http://localhost:8000/mcp
-```
-
-#### Method 2: Query Parameter
-```bash
-curl "http://localhost:8000/mcp?access_token=ya29.a0AfH6SMC..."
-```
-
-#### Method 3: Tool Parameter
-```bash
-# Use authenticate_with_bearer_token tool
-{
-  "method": "tools/call",
-  "params": {
-    "name": "authenticate_with_bearer_token",
-    "arguments": {
-      "bearer_token": "ya29.a0AfH6SMC..."
-    }
-  }
-}
 ```
 
 ### 4. Code Changes Made
@@ -62,13 +44,12 @@ curl "http://localhost:8000/mcp?access_token=ya29.a0AfH6SMC..."
 - `src/mcp_google_sheets/server.py` - Main server implementation
 
 #### Key Functions Added/Modified:
-- `get_bearer_token_from_request()` - Extracts bearer tokens from client requests
+- `get_bearer_token_from_request()` - Extracts bearer tokens from Authorization headers
 - `get_google_services(bearer_token=None)` - Updated to support bearer tokens
-- `authenticate_with_bearer_token(bearer_token)` - New tool for explicit token auth
 - Authentication initialization logic - Supports all three modes
 
 #### New Files Created:
-- `test_bearer_token.py` - Test script demonstrating all three methods
+- `test_bearer_token.py` - Test script demonstrating Authorization header method
 - `BEARER_TOKEN_USAGE.md` - Comprehensive documentation
 
 ### 5. Technical Implementation Details
@@ -78,6 +59,7 @@ curl "http://localhost:8000/mcp?access_token=ya29.a0AfH6SMC..."
 from fastmcp.server.dependencies import get_request
 
 def get_bearer_token_from_request():
+    """Extract bearer token from request Authorization header if available"""
     request = get_request()
     if request and hasattr(request, 'headers'):
         auth_header = request.headers.get('Authorization', '')
@@ -87,7 +69,7 @@ def get_bearer_token_from_request():
 
 #### Authentication Flow
 1. Server checks `AUTH_MODE` environment variable
-2. For `bearer`/`hybrid` modes, tries to extract token from request
+2. For `bearer`/`hybrid` modes, tries to extract token from Authorization header
 3. Falls back to environment variable if no request token
 4. Creates Google credentials with the token
 5. Uses credentials for Google API calls
@@ -130,10 +112,8 @@ response = requests.post("http://localhost:8000/mcp",
 
 ### 7. Testing
 ```bash
-# Test all three methods
-python test_bearer_token.py --bearer-token "ya29.a0AfH6SMC..." --method header
-python test_bearer_token.py --bearer-token "ya29.a0AfH6SMC..." --method query
-python test_bearer_token.py --bearer-token "ya29.a0AfH6SMC..." --method tool
+# Test Authorization header method
+python test_bearer_token.py --bearer-token "ya29.a0AfH6SMC..."
 ```
 
 ## Current Status
@@ -141,10 +121,10 @@ python test_bearer_token.py --bearer-token "ya29.a0AfH6SMC..." --method tool
 
 ## Key Benefits Achieved
 1. **No OAuth Flow Required** - Clients can authenticate directly with tokens
-2. **Multiple Input Methods** - Flexible ways to pass tokens
+2. **Standard HTTP Authentication** - Uses Authorization header (RFC 6750)
 3. **Backward Compatible** - Existing OAuth setup still works
 4. **Secure** - Uses Google's standard bearer token authentication
-5. **Easy Integration** - Simple HTTP headers or parameters
+5. **Easy Integration** - Simple HTTP Authorization header
 
 ## Files to Reference
 - `src/mcp_google_sheets/server.py` - Main implementation

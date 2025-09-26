@@ -1,26 +1,16 @@
 # Bearer Token Authentication
 
-This MCP server supports bearer token authentication, allowing clients to pass Google OAuth access tokens directly without going through the OAuth flow.
+This MCP server supports both OAuth and bearer token authentication, allowing clients to pass Google OAuth access tokens directly without going through the OAuth flow.
 
-## Authentication Modes
+## Authentication
 
-### 1. Bearer Token Mode (`AUTH_MODE=bearer`)
-- Uses only bearer tokens for authentication
-- No OAuth flow required
-- Tokens can be provided via environment variable or client requests
-
-### 2. Hybrid Mode (`AUTH_MODE=hybrid`)
-- Supports both OAuth and bearer token authentication
-- Clients can choose either authentication method
-- OAuth flow still available for interactive use
-
-### 3. OAuth Mode (`AUTH_MODE=oauth`) - Default
-- Traditional OAuth flow only
-- No bearer token support
+The server supports both authentication methods simultaneously:
+- **OAuth**: Traditional interactive OAuth flow for web applications
+- **Bearer Token**: Direct token authentication for server-to-server communication
 
 ## How Clients Can Pass Bearer Tokens
 
-### Method 1: Authorization Header (Recommended)
+### Authorization Header
 ```bash
 curl -H "Authorization: Bearer ya29.a0AfH6SMC..." \
      -H "Content-Type: application/json" \
@@ -28,37 +18,17 @@ curl -H "Authorization: Bearer ya29.a0AfH6SMC..." \
      http://localhost:8000/mcp
 ```
 
-### Method 2: Query Parameter
-```bash
-curl -H "Content-Type: application/json" \
-     -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "get_user_info", "arguments": {}}}' \
-     "http://localhost:8000/mcp?access_token=ya29.a0AfH6SMC..."
-```
-
-### Method 3: Tool Parameter
-```bash
-curl -H "Content-Type: application/json" \
-     -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "authenticate_with_bearer_token", "arguments": {"bearer_token": "ya29.a0AfH6SMC..."}}}' \
-     http://localhost:8000/mcp
-```
-
 ## Server Configuration
 
-### Bearer Token Mode
 ```bash
-export AUTH_MODE=bearer
-export BEARER_TOKEN="ya29.a0AfH6SMC..."  # Optional fallback
-export FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID="your-client-id"
-export FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET="your-client-secret"
-```
-
-### Hybrid Mode
-```bash
-export AUTH_MODE=hybrid
+# Required OAuth credentials
 export FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_ID="your-client-id"
 export FASTMCP_SERVER_AUTH_GOOGLE_CLIENT_SECRET="your-client-secret"
 export FASTMCP_SERVER_AUTH_GOOGLE_BASE_URL="http://localhost:8000"
 export FASTMCP_SERVER_AUTH_GOOGLE_REQUIRED_SCOPES="https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive"
+
+# Optional bearer token for server-to-server authentication
+export BEARER_TOKEN="ya29.a0AfH6SMC..."
 ```
 
 ## Testing Bearer Token Authentication
@@ -67,13 +37,7 @@ Use the provided test script:
 
 ```bash
 # Test with Authorization header
-python test_bearer_token.py --bearer-token "ya29.a0AfH6SMC..." --method header
-
-# Test with query parameter
-python test_bearer_token.py --bearer-token "ya29.a0AfH6SMC..." --method query
-
-# Test with tool parameter
-python test_bearer_token.py --bearer-token "ya29.a0AfH6SMC..." --method tool
+python test_bearer_token.py --bearer-token "ya29.a0AfH6SMC..."
 ```
 
 ## Getting Google OAuth Access Tokens
